@@ -3,6 +3,8 @@ uvicorn[standard]==0.24.0
 pydantic==2.5.0
 python-multipart==0.0.6
 pillow
+colorthief
+
 sqlite-vec
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
@@ -11,3 +13,6 @@ numpy
 aiofiles==23.2.1
 sqlalchemy
 jwt
+sqlalchemy
+python-jose
+
