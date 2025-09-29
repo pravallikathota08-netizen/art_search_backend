@@ -34,66 +34,6 @@ from auth import (
 )
 from schemas import Token, SearchResponse, UploadResponse
 from config import CORS_ORIGINS, MAX_FILE_SIZE, ALLOWED_IMAGE_TYPES
-from fastapi import FastAPI, UploadFile, File
-import uvicorn
-import glob
-import cv2
-import numpy as np
-from sklearn.cluster import KMeans
-from skimage import color
-from scipy.spatial.distance import cdist
-import tempfile
-import shutil
-
-app = FastAPI()
-
-# ------------------------
-# Palette Extraction
-# ------------------------
-def extract_palette(image_path, k=5):
-    img = cv2.imread(image_path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.reshape((-1, 3))
-    kmeans = KMeans(n_clusters=k, random_state=42)
-    kmeans.fit(img)
-    return kmeans.cluster_centers_.astype(int)
-
-def palette_distance(palette1, palette2):
-    lab1 = color.rgb2lab(np.array(palette1).reshape(1, -1, 3)/255.0)
-    lab2 = color.rgb2lab(np.array(palette2).reshape(1, -1, 3)/255.0)
-    dists = cdist(lab1.reshape(-1,3), lab2.reshape(-1,3), metric='euclidean')
-    return dists.min(axis=1).mean()
-
-# ------------------------
-# Build DB (on startup)
-# ------------------------
-image_folder = "images/*.jpg"  # Change to your folder
-image_paths = glob.glob(image_folder)
-
-palette_db = {path: extract_palette(path, k=5) for path in image_paths}
-
-# ------------------------
-# API Endpoint
-# ------------------------
-@app.post("/search")
-async def search_images(file: UploadFile = File(...), top_n: int = 5):
-    # Save uploaded file temporarily
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-    with open(temp_file.name, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    query_palette = extract_palette(temp_file.name, k=5)
-    scores = [(path, palette_distance(query_palette, palette)) 
-              for path, palette in palette_db.items()]
-    scores.sort(key=lambda x: x[1])
-
-    return {"matches": scores[:top_n]}
-
-# ------------------------
-# Run server
-# ------------------------
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 # ───────────────────────────────
 # App setup
@@ -139,7 +79,8 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         )
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.username}, expires_delta=access_token_expires
+        data={"sub": user.username, "role": user.role},  # include role
+        expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
@@ -152,6 +93,10 @@ async def bulk_upload_images(
     current_user: User = Depends(get_current_user),
     db=Depends(get_db)
 ):
+    # Only admins can bulk upload
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can upload artworks")
+
     processed_count = 0
     for file in files:
         if file.content_type not in ALLOWED_IMAGE_TYPES:
@@ -201,19 +146,68 @@ async def bulk_upload_images(
     return UploadResponse(message=f"Uploaded and processed {processed_count} images.")
 
 # ───────────────────────────────
-# Search
+# Utils
+# ───────────────────────────────
+def str_to_bool(value: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    return value.lower() in ("true", "1", "yes", "on")
+
+WEIGHTS = {
+    "style": 0.2,
+    "texture": 0.15,
+    "palette": 0.6,
+    "emotion": 0.05,
+}
+
+def insert_vectors_to_db(artwork_id, style_embedding, texture_embedding, palette_embedding, emotion_embedding):
+    try:
+        conn = sqlite3.connect("artworks.db")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        conn.execute("""
+            INSERT OR REPLACE INTO artworks_vectors 
+            (rowid, style_embedding, texture_embedding, palette_embedding, emotion_embedding)
+            VALUES (?, ?, ?, ?, ?)
+        """, (artwork_id, style_embedding, texture_embedding, palette_embedding, emotion_embedding))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error inserting vectors: {e}")
+        return False
+
+def calculate_cosine_similarity(vec1, vec2):
+    v1, v2 = np.array(vec1), np.array(vec2)
+    dot = np.dot(v1, v2)
+    norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
+    if norm1 == 0 or norm2 == 0:
+        return 0
+    return dot / (norm1 * norm2)
+
+# ───────────────────────────────
+# Search (respects filters)
 # ───────────────────────────────
 @app.post("/search/", response_model=List[SearchResponse])
 async def search_similar_artworks(
     file: UploadFile = File(...),
+    style: bool = Form(True),
+    texture: bool = Form(True),
+    colorPalette: bool = Form(True),
+    emotion: bool = Form(True),
     selected_color: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
     db=Depends(get_db)
 ):
+    style = str_to_bool(style)
+    texture = str_to_bool(texture)
+    colorPalette = str_to_bool(colorPalette)
+    emotion = str_to_bool(emotion)
+
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Invalid image type")
 
-    # size check
     file.file.seek(0, 2)
     file_size = file.file.tell()
     file.file.seek(0)
@@ -225,40 +219,85 @@ async def search_similar_artworks(
         shutil.copyfileobj(file.file, buffer)
 
     try:
-        # only palette embedding
-        query_palette = generate_palette_embedding(temp_path)
+        # Only generate embeddings for enabled filters
+        query_embeddings = {}
+        if style:
+            query_embeddings["style"] = generate_style_embedding(temp_path)
+        if texture:
+            query_embeddings["texture"] = generate_texture_embedding(temp_path)
+        if colorPalette:
+            query_embeddings["palette"] = generate_palette_embedding(temp_path)
+        if emotion:
+            query_embeddings["emotion"] = generate_emotion_embedding(temp_path)
 
         artworks = db.query(Artwork).all()
         similarities = []
 
         for artwork in artworks:
-            stored = json.loads(artwork.palette_embedding)
-            score = calculate_cosine_similarity(query_palette, stored)
+            total_score = 0.0
+            total_weight = 0.0
+            reasons = []
 
-            # extra check if user clicked a color
-            if selected_color and selected_color.lower() not in json.dumps(stored).lower():
-                score *= 0.7
+            if style and artwork.style_embedding:
+                stored = json.loads(artwork.style_embedding)
+                score = calculate_cosine_similarity(query_embeddings["style"], stored)
+                total_score += score * WEIGHTS["style"]
+                total_weight += WEIGHTS["style"]
+                reasons.append(f"Style {score:.2f}")
 
-            similarities.append((artwork, score))
+            if texture and artwork.texture_embedding:
+                stored = json.loads(artwork.texture_embedding)
+                score = calculate_cosine_similarity(query_embeddings["texture"], stored)
+                total_score += score * WEIGHTS["texture"]
+                total_weight += WEIGHTS["texture"]
+                reasons.append(f"Texture {score:.2f}")
 
-        # sort by palette similarity only
+            if colorPalette and artwork.palette_embedding:
+                stored = json.loads(artwork.palette_embedding)
+                score = calculate_cosine_similarity(query_embeddings["palette"], stored)
+
+                if selected_color and selected_color.lower() not in json.dumps(stored).lower():
+                    score *= 0.7
+
+                total_score += score * WEIGHTS["palette"]
+                total_weight += WEIGHTS["palette"]
+                reasons.append(f"Palette {score:.2f}")
+
+            if emotion and artwork.emotion_embedding:
+                stored = json.loads(artwork.emotion_embedding)
+                score = calculate_cosine_similarity(query_embeddings["emotion"], stored)
+                total_score += score * WEIGHTS["emotion"]
+                total_weight += WEIGHTS["emotion"]
+                reasons.append(f"Emotion {score:.2f}")
+
+            final_score = total_score / total_weight if total_weight > 0 else 0
+            similarities.append((artwork, final_score, reasons))
+
+        # Sort by score
         similarities.sort(key=lambda x: x[1], reverse=True)
-        top_results = similarities[:10]
+
+        # 🔥 Apply a minimum similarity threshold
+        threshold = 0.5
+        filtered_results = [(art, score, reasons) for art, score, reasons in similarities if score >= threshold]
+
+        if not filtered_results:
+            return []  # return nothing if no good matches
+
+        top_results = filtered_results[:10]
 
         return [
             SearchResponse(
                 imageUrl=f"http://127.0.0.1:8000/images/{art.filename}",
-                tags=["palette"],
-                matchReason=f"Palette similarity {score:.2f}",
+                tags=["style", "texture", "palette", "emotion"],
+                matchReason=", ".join(reasons) if reasons else "No filters applied",
                 similarity=score,
             )
-            for art, score in top_results
+            for art, score, reasons in top_results
         ]
 
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
-
 
 # ───────────────────────────────
 # Palette
@@ -292,35 +331,6 @@ async def extract_palette(file: UploadFile = File(...), current_user: User = Dep
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
-
-# ───────────────────────────────
-# Utils
-# ───────────────────────────────
-def insert_vectors_to_db(artwork_id, style_embedding, texture_embedding, palette_embedding, emotion_embedding):
-    try:
-        conn = sqlite3.connect("artworks.db")
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        conn.execute("""
-            INSERT OR REPLACE INTO artworks_vectors 
-            (rowid, style_embedding, texture_embedding, palette_embedding, emotion_embedding)
-            VALUES (?, ?, ?, ?, ?)
-        """, (artwork_id, style_embedding, texture_embedding, palette_embedding, emotion_embedding))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Error inserting vectors: {e}")
-        return False
-
-def calculate_cosine_similarity(vec1, vec2):
-    v1, v2 = np.array(vec1), np.array(vec2)
-    dot = np.dot(v1, v2)
-    norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
-    if norm1 == 0 or norm2 == 0:
-        return 0
-    return dot / (norm1 * norm2)
 
 # ───────────────────────────────
 # Health
