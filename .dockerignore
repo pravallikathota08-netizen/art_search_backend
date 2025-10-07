@@ -80,3 +80,11 @@ logs/
 # Temporary files
 temp_*
 tmp/
+wikiart_dataset
+*.zip
+
+wikiart_dataset/
+*.zip
+logs/
+__pycache__/
+.venv/

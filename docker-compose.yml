@@ -1,28 +1,79 @@
+version: "3.9"
+
 services:
+  db:
+    image: postgres:15
+    container_name: artsearch-db
+    restart: always
+    environment:
+      POSTGRES_USER: art
+      POSTGRES_PASSWORD: artpass
+      POSTGRES_DB: artsearch
+    volumes:
+      - artsearch_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
   art-search-backend:
     build: .
+    container_name: art-search-backend
     ports:
       - "8000:8000"
+    depends_on:
+      - db
+
     environment:
+      # ───────────────────────────────
+      # Authentication and JWT settings
+      # ───────────────────────────────
       - SECRET_KEY=your-secret-key-change-this-in-production
       - ALGORITHM=HS256
       - ACCESS_TOKEN_EXPIRE_MINUTES=30
-      - DATABASE_URL=sqlite:///./artworks.db
+
+      # ───────────────────────────────
+      # Database: now using PostgreSQL (persistent via named volume)
+      # ───────────────────────────────
+      - DATABASE_URL=postgresql+psycopg2://art:artpass@db:5432/artsearch
+
+      # ───────────────────────────────
+      # CORS (Frontend connections)
+      # ───────────────────────────────
       - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080
+
+      # ───────────────────────────────
+      # Admin defaults (created at init)
+      # ───────────────────────────────
       - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=admin
+      - ADMIN_PASSWORD=admin123
+
+      # ───────────────────────────────
+      # Embedding configuration
+      # ───────────────────────────────
       - EMBEDDING_DIM=512
+
+      # ───────────────────────────────
+      # Optional base URL for image links (frontend use)
+      # ───────────────────────────────
+      - PUBLIC_BASE_URL=http://localhost:8000
+
     volumes:
-      # Persist database and uploaded images
-      - ./data:/app/data
+      # ───────────────────────────────
+      # Persist all important data
+      # ───────────────────────────────
       - ./images:/app/images
+      - ./wikiart_dataset/wikiart:/app/wikiart_dataset/wikiart  # Bulk dataset
+
     restart: unless-stopped
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+
+volumes:
+  artsearch_data:
 
 networks:
   default:

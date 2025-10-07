@@ -13,17 +13,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update && apt-get install -y \
     build-essential \
     libsqlite3-dev \
+    sqlite3 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better Docker layer caching
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir opencv-python-headless scikit-learn scikit-image numpy
-
-
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir opencv-python-headless scikit-learn scikit-image numpy && \
     pip install --no-cache-dir -r requirements.txt
 
 # Copy application code

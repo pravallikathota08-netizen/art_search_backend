@@ -12,6 +12,7 @@ from models import User
 SECRET_KEY = "your-secret-key-change-this-in-production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+MAX_PASSWORD_LEN = 72  # bcrypt limit
 
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -19,15 +20,24 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-def verify_password(plain_password, hashed_password):
+# Password helpers
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    # ✅ Prevent bcrypt crash
+    if len(plain_password) > MAX_PASSWORD_LEN:
+        return False
     return pwd_context.verify(plain_password, hashed_password)
 
-def get_password_hash(password):
+def get_password_hash(password: str) -> str:
+    # ✅ Prevent too-long passwords at creation
+    if len(password) > MAX_PASSWORD_LEN:
+        raise ValueError("Password too long. Maximum allowed is 72 characters.")
     return pwd_context.hash(password)
 
+# DB user fetch
 def get_user(db: Session, username: str):
     return db.query(User).filter(User.username == username).first()
 
+# Authentication
 def authenticate_user(username: str, password: str):
     db = next(get_db())
     user = get_user(db, username)
@@ -37,6 +47,7 @@ def authenticate_user(username: str, password: str):
         return False
     return user
 
+# JWT helpers
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
@@ -47,6 +58,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+# Current user
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

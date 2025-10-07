@@ -1,28 +1,35 @@
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-import sqlite3
-import sqlite_vec
+# database.py
 import os
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-# Database URL
-SQLALCHEMY_DATABASE_URL = "sqlite:///./artworks.db"
+# ────────────────────────────────────────────────
+# Database URL: defaults to SQLite if not provided
+# ────────────────────────────────────────────────
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/artworks.db")
 
-# Create engine
-engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
-    connect_args={"check_same_thread": False}
-)
+# ────────────────────────────────────────────────
+# Connection args: only for SQLite
+# ────────────────────────────────────────────────
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+else:
+    connect_args = {}
 
-# Create session
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# ────────────────────────────────────────────────
+# Engine setup (echo=False avoids noisy logs)
+# ────────────────────────────────────────────────
+engine = create_engine(DATABASE_URL, echo=False, future=True, connect_args=connect_args)
 
-# Base class for models
+# ────────────────────────────────────────────────
+# Session and Base
+# ────────────────────────────────────────────────
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
 Base = declarative_base()
 
 
-# Dependency to get database session
 def get_db():
+    """FastAPI dependency to get DB session."""
     db = SessionLocal()
     try:
         yield db
@@ -30,56 +37,34 @@ def get_db():
         db.close()
 
 
-# Initialize database
 def init_db():
-    # Import models so they're registered
-    import models
-    from models import User
+    """Create tables and seed default admin user if missing."""
+    from models import User, Artwork, Embedding
     from auth import get_password_hash
 
-    # Create tables
+    print(f"🗄️ Connecting to database: {DATABASE_URL}")
+
+    # Create all tables
     Base.metadata.create_all(bind=engine)
 
-    # Enable vector search extension
-    conn = sqlite3.connect("artworks.db")
-    conn.enable_load_extension(True)
-
-    try:
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-        vec_version, = conn.execute("SELECT vec_version()").fetchone()
-        print(f"✅ sqlite-vec extension loaded successfully, version: {vec_version}")
-
-        # Create virtual table for embeddings
-        conn.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS artworks_vectors USING vec0(
-                style_embedding float[512],
-                texture_embedding float[512],
-                palette_embedding float[512],
-                emotion_embedding float[512]
-            )
-        """)
-    except Exception as e:
-        print(f"⚠️ Warning: Could not load sqlite-vec extension: {e}")
-        print("➡️ Falling back to Python similarity calculation")
-        conn.enable_load_extension(False)
-
-    # Create default admin user
     db = SessionLocal()
     try:
-        admin_user = db.query(User).filter(User.username == "admin").first()
+        admin_username = os.getenv("ADMIN_USERNAME", "admin")
+        admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
+
+        admin_user = db.query(User).filter(User.username == admin_username).first()
         if not admin_user:
             admin_user = User(
-                username="admin",
-                hashed_password=get_password_hash("admin123"),  # default password
-                role="admin"  # make sure role column exists in models.User
+                username=admin_username,
+                hashed_password=get_password_hash(admin_password),
+                role="admin",
             )
             db.add(admin_user)
             db.commit()
-            print("👤 Default admin created (username=admin, password=admin123)")
+            print(f"👤 Default admin created (username={admin_username}, password={admin_password})")
         else:
             print("ℹ️ Admin user already exists")
     finally:
         db.close()
 
-    conn.close()
+    print("✅ Database initialization complete.")
