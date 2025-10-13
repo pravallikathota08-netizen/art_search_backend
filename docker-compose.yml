@@ -13,68 +13,74 @@ services:
       - artsearch_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U art -d artsearch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - art-search-network
+
+  weaviate:
+    image: semitechnologies/weaviate:1.25.3
+    container_name: artsearch-weaviate
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      ENABLE_MODULES: text2vec-transformers
+      TRANSFORMERS_INFERENCE_API: http://t2v-transformers:8080
+      CLUSTER_HOSTNAME: node1
+    depends_on:
+      - t2v-transformers
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8080/v1/.well-known/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+    volumes:                      
+      - weaviate_data:/var/lib/weaviate
+
+    networks:
+      - art-search-network
+
+
+  t2v-transformers:
+    image: semitechnologies/transformers-inference:sentence-transformers-all-MiniLM-L6-v2
+    container_name: t2v-transformers
+    environment:
+      ENABLE_CUDA: "0"
+    networks:
+      - art-search-network
 
   art-search-backend:
     build: .
     container_name: art-search-backend
+    depends_on:
+      weaviate:
+        condition: service_healthy
+      db:
+        condition: service_healthy
     ports:
       - "8000:8000"
-    depends_on:
-      - db
-
     environment:
-      # ───────────────────────────────
-      # Authentication and JWT settings
-      # ───────────────────────────────
-      - SECRET_KEY=your-secret-key-change-this-in-production
-      - ALGORITHM=HS256
-      - ACCESS_TOKEN_EXPIRE_MINUTES=30
-
-      # ───────────────────────────────
-      # Database: now using PostgreSQL (persistent via named volume)
-      # ───────────────────────────────
-      - DATABASE_URL=postgresql+psycopg2://art:artpass@db:5432/artsearch
-
-      # ───────────────────────────────
-      # CORS (Frontend connections)
-      # ───────────────────────────────
-      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:8080
-
-      # ───────────────────────────────
-      # Admin defaults (created at init)
-      # ───────────────────────────────
-      - ADMIN_USERNAME=admin
-      - ADMIN_PASSWORD=admin123
-
-      # ───────────────────────────────
-      # Embedding configuration
-      # ───────────────────────────────
-      - EMBEDDING_DIM=512
-
-      # ───────────────────────────────
-      # Optional base URL for image links (frontend use)
-      # ───────────────────────────────
-      - PUBLIC_BASE_URL=http://localhost:8000
-
+      DATABASE_URL: postgresql+psycopg2://art:artpass@db:5432/artsearch
+      WEAVIATE_URL: http://weaviate:8080
+    networks:
+      - art-search-network
     volumes:
-      # ───────────────────────────────
-      # Persist all important data
-      # ───────────────────────────────
+      - .:/app 
       - ./images:/app/images
-      - ./wikiart_dataset/wikiart:/app/wikiart_dataset/wikiart  # Bulk dataset
-
-    restart: unless-stopped
-
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
+      - ./data/wikiart:/app/data/wikiart
+      - ./data/artworks.db:/app/data/wikiart/artworks.db 
 volumes:
   artsearch_data:
+  weaviate_data:
 
 networks:
-  default:
-    name: art-search-network
+  art-search-network:
+    driver: bridge

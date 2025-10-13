@@ -4,6 +4,7 @@ pydantic==2.5.0
 python-multipart==0.0.6
 pillow
 colorthief
+tqdm
 bcrypt==4.0.1
 passlib[bcrypt]==1.7.4
 sqlite-vec
@@ -15,6 +16,7 @@ aiofiles==23.2.1
 sqlalchemy
 jwt
 sqlalchemy
+weaviate-client==4.6.2
 psycopg2-binary==2.9.9
 python-jose
 

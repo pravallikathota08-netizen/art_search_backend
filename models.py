@@ -1,9 +1,12 @@
 # models.py
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float
 from sqlalchemy.sql import func
 from sqlalchemy.types import JSON
 from database import Base
+from datetime import datetime
+from sqlalchemy.orm import relationship
+
+
 
 class User(Base):
     __tablename__ = "users"
@@ -26,7 +29,7 @@ class Artwork(Base):
     emotion = Column(String, nullable=True)
     uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # ✅ single relationship, not a list
+    # single relationship, not a list
     embedding = relationship("Embedding", back_populates="artwork", uselist=False, cascade="all, delete-orphan")
 
 class Embedding(Base):
@@ -41,3 +44,23 @@ class Embedding(Base):
     emotion_vector = Column(JSON, nullable=True)
 
     artwork = relationship("Artwork", back_populates="embedding")
+
+class MetadataValidation(Base):
+    __tablename__ = "metadata_validation"
+    id = Column(Integer, primary_key=True)
+    artwork_id = Column(Integer, ForeignKey("artworks.id"))
+    status = Column(String)          # PASSED / FAILED
+    issues = Column(Text, nullable=True)
+    timestamp = Column(DateTime)
+
+class DataQualityAudit(Base):
+    __tablename__ = "data_quality_audit"
+
+    id = Column(Integer, primary_key=True, index=True)
+    total_embeddings = Column(Integer)
+    valid_embeddings = Column(Integer)
+    invalid_embeddings = Column(Integer)
+    avg_norm = Column(Float)
+    norm_std = Column(Float)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    status = Column(String, default="OK") 

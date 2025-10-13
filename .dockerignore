@@ -5,6 +5,20 @@ __pycache__/
 *.so
 .Python
 build/
+# Ignore local data and cache files
+data/
+images/
+__pycache__/
+*.pyc
+*.db
+*.sqlite
+*.log
+
+# Node or IDE junk
+node_modules/
+.vscode/
+.idea/
+
 develop-eggs/
 dist/
 downloads/
