@@ -16,6 +16,7 @@ from PIL import Image
 import numpy as np
 from pydantic import BaseModel
 from colorthief import ColorThief
+from datetime import datetime
 from vector_db import init_weaviate_schema, insert_embedding_to_weaviate
 from schemas import Token, SearchResponse, UploadResponse, FileResult, ArtworkMetadata
 
@@ -157,14 +158,40 @@ def extract_dominant_palette(path: str, count: int = 5):
     except Exception:
         return []
 
-def auto_tags_from_embeddings(embs):
-    """Simple label heuristics (placeholder)."""
-    return {
-        "style": "Abstract" if np.mean(embs["style"]) >= 0 else "Realistic",
-        "color": "Vibrant" if np.mean(embs["palette"]) >= 0 else "Muted",
-        "texture": "Smooth" if np.mean(embs["texture"]) >= 0 else "Rough",
-        "emotion": "Happy" if np.mean(embs["emotion"]) >= 0 else "Calm",
-    }
+
+
+STYLE_LABELS = ["Impressionism", "Cubism", "Expressionism", "Renaissance", "Realism", "Modern"]
+TEXTURE_LABELS = ["Smooth", "Rough", "Detailed", "Abstract"]
+COLOR_LABELS = ["Warm", "Cool", "Neutral"]
+EMOTION_LABELS = ["Calm", "Energetic", "Melancholic", "Joyful", "Mysterious"]
+
+def auto_tags_from_embeddings(embs: dict):
+    """
+    Simple heuristic metadata generator based on vector averages.
+    Replace later with ML model.
+    """
+    try:
+        # ✅ Compatibility fix: allow either "palette" or "color"
+        if "palette" not in embs and "color" in embs:
+            embs["palette"] = embs["color"]
+
+        # pick random tags based on embedding patterns (temporary)
+        style = STYLE_LABELS[int(abs(np.mean(embs["style"])) * 10) % len(STYLE_LABELS)]
+        texture = TEXTURE_LABELS[int(abs(np.mean(embs["texture"])) * 10) % len(TEXTURE_LABELS)]
+        color = COLOR_LABELS[int(abs(np.mean(embs["palette"])) * 10) % len(COLOR_LABELS)]
+        emotion = EMOTION_LABELS[int(abs(np.mean(embs["emotion"])) * 10) % len(EMOTION_LABELS)]
+
+        return {
+            "style": style,
+            "texture": texture,
+            "color": color,
+            "emotion": emotion,
+        }
+    except Exception as e:
+        print(f"⚠️ auto_tags_from_embeddings failed: {e}")
+        return None
+
+
 
 # ───────────────────────────────
 # Embeddings
@@ -219,7 +246,6 @@ async def _bulk_upload_impl(files: List[UploadFile], current_user: User, db: Ses
             embs = generate_all_embeddings(file_path)
             tags = auto_tags_from_embeddings(embs)
 
-            # 4️⃣ Create Artwork
             artwork = Artwork(
                 filename=safe_name,
                 filepath=file_path,
@@ -227,13 +253,16 @@ async def _bulk_upload_impl(files: List[UploadFile], current_user: User, db: Ses
                 color=tags.get("color"),
                 texture=tags.get("texture"),
                 emotion=tags.get("emotion"),
+                metadata_json=tags,
+                is_permanent=True
             )
+            
             db.add(artwork)
             db.commit()         # ensure ID is generated
             db.refresh(artwork) # refresh to get primary key
             
             #Push embeddings into Weaviate
-            insert_embedding_to_weaviate(artwork, embs)
+            insert_embedding_to_weaviate(artwork, embs, permanent=True)
 
             # Create Embedding
             emb_row = Embedding(
@@ -285,13 +314,13 @@ async def bulk_upload_images(
 # ───────────────────────────────
 # Search
 # ───────────────────────────────
-def _normalized_weights(style, texture, palette, emotion, sw, tw, pw, ew):
+def _normalized_weights(style, texture, color, emotion, sw, tw, cw, ew):
     weights = {}
     total = 0.0
     for key, val, use in [
         ("style", sw, style),
         ("texture", tw, texture),
-        ("palette", pw, palette),
+        ("color", cw, color),
         ("emotion", ew, emotion),
     ]:
         if use:
@@ -351,7 +380,7 @@ async def _search_impl(
             raise HTTPException(status_code=400, detail="No filters selected")
         
         # Combine embeddings exactly like stored in Weaviate (concat order matters)
-        ordered_keys = ["style", "texture", "palette", "emotion"]
+        ordered_keys = ["style", "texture", "color", "emotion"]
         parts = []
         for k in ordered_keys:
             if k in query_embs:
@@ -375,7 +404,7 @@ async def _search_impl(
                     "filepath",
                     "style",
                     "texture",
-                    "palette",
+                    "color",
                     "emotion",
                     "_additional {certainty}"
                 ],
@@ -434,19 +463,19 @@ async def search_similar_artworks(
     file: UploadFile = File(...),
     style: bool = Form(True),
     texture: bool = Form(True),
-    colorPalette: bool = Form(True),
+    color: bool = Form(True),
     emotion: bool = Form(True),
     style_weight: float = Form(25.0),
     texture_weight: float = Form(25.0),
-    palette_weight: float = Form(25.0),
+    color_weight: float = Form(25.0),
     emotion_weight: float = Form(25.0),
     selected_color: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     return await _search_impl(
-        file, style, texture, colorPalette, emotion,
-        style_weight, texture_weight, palette_weight, emotion_weight,
+        file, style, texture, color, emotion,
+        style_weight, texture_weight, color_weight, emotion_weight,
         selected_color, current_user, db
     )
 

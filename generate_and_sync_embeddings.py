@@ -1,29 +1,35 @@
-# generate_and_sync_embeddings.py
+import os, sys
+sys.path.append(os.path.dirname(__file__))
+
 import os
-import sys
 import json
 import logging
 import sqlite3
-from uuid import uuid4
-from typing import Optional
+import glob
 import numpy as np
 from tqdm import tqdm
-
 from weaviate import Client
+import gc
+from PIL import Image
+import uuid
 
-# Import your existing embedding functions from main.py
-from main import (
+from ml_models import (
     generate_style_embedding,
     generate_texture_embedding,
     generate_palette_embedding as generate_color_embedding,
     generate_emotion_embedding,
 )
+from main import auto_tags_from_embeddings
+from vector_db import insert_embedding_to_weaviate
+from database import SessionLocal
 
-# Logging setup
+
+# ─────────────────────────────────────────────────────────────
+# Setup logging
+# ─────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(name)s:%(message)s")
 logger = logging.getLogger("sync")
-logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
-CLASS_NAME = "ArtEmbedding"
 
 def get_db_conn(db_path: str):
     """Connect to the SQLite artworks database."""
@@ -33,115 +39,132 @@ def get_db_conn(db_path: str):
     conn.row_factory = sqlite3.Row
     return conn
 
-def ensure_schema(client: Client):
-    """Ensure the ArtEmbedding schema exists in Weaviate."""
-    if not client.schema.exists(CLASS_NAME):
-        schema = {
-            "class": CLASS_NAME,
-            "description": "Stores artwork embeddings and metadata for search",
-            "vectorizer": "none",
-            "properties": [
-                {"name": "filename", "dataType": ["text"]},
-                {"name": "filepath", "dataType": ["text"]},
-                {"name": "style", "dataType": ["text"]},
-                {"name": "texture", "dataType": ["text"]},
-                {"name": "palette", "dataType": ["text"]},
-                {"name": "emotion", "dataType": ["text"]},
-            ],
-        }
-        client.schema.create_class(schema)
-        logger.info("✅ Created Weaviate class ArtEmbedding")
-    else:
-        logger.info("ℹ️ Weaviate class ArtEmbedding already exists")
-
-def build_vector_from_image(image_path: str) -> Optional[np.ndarray]:
-    """Generate and concatenate all embeddings for one image."""
+# Safe wrapper so embedding generation never fails
+def safe_embedding(generator, path):
     try:
-        s = generate_style_embedding(image_path)
-        t = generate_texture_embedding(image_path)
-        c = generate_color_embedding(image_path)     # “color” → stored as “palette”
-        e = generate_emotion_embedding(image_path)
+        v = generator(path)
+        return np.array(v, dtype=np.float32)
+    except Exception as e:
+        logger.warning(f"⚠️ Dummy vector for {os.path.basename(path)}: {e}")
+        return np.random.randn(512).astype(np.float32)
 
-        if not all([s is not None, t is not None, c is not None, e is not None]):
-            return None
-
-        parts = [np.array(v, dtype=np.float32).flatten() for v in (s, t, c, e)]
-        return np.concatenate(parts)
-    except Exception as ex:
-        logger.error(f"Embedding failed for {image_path}: {ex}")
-        return None
-
-def sync_embeddings(db_path: str, images_root: str):
-    """Generate and push all embeddings from SQLite into Weaviate."""
-    client = Client(os.getenv("WEAVIATE_URL", "http://weaviate:8080"))
-
-    if not client.is_ready():
-        raise RuntimeError("❌ Weaviate is not ready.")
-
-    ensure_schema(client)
-
-    conn = get_db_conn(db_path)
+# ─────────────────────────────────────────────────────────────
+# Rebuild embeddings + metadata
+# ─────────────────────────────────────────────────────────────
+def regenerate_all(db_path: str):
+    """Regenerate embeddings + metadata for all permanent artworks and sync to Weaviate."""
+    # SQLite connection
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"SQLite not found: {db_path}")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-    cur.execute("SELECT filename, filepath, style, color, texture, emotion FROM artworks")
+
+    # Select artworks marked permanent
+    cur.execute("""
+        SELECT id, filename, filepath
+        FROM artworks
+        WHERE is_permanent = 1
+            AND color IS NOT NULL
+    """)
+
     rows = cur.fetchall()
+    if not rows:
+        logger.warning("⚠️ No permanent artworks found.")
+        return
 
-    logger.info(f"📦 Found {len(rows)} artworks in {db_path}")
-    batch = []
-    pbar = tqdm(rows, desc="Syncing to Weaviate", unit="img")
+    db = SessionLocal()
+    logger.info(f"🔁 Regenerating {len(rows)} artworks…")
 
-    for r in pbar:
+    for r in tqdm(rows, desc="Syncing", unit="img"):
+        art_id = r["id"]
         filename = r["filename"]
         filepath = r["filepath"]
-        style = r["style"]
-        texture = r["texture"]
-        color = r["color"]
-        emotion = r["emotion"]
 
-        # Build full image path correctly based on DB structure
-        image_path = os.path.join("/app", filepath)
+        # 🖼️ Recursively search for the image in known folders
+        abs_path = None
+        search_name = os.path.basename(filepath)
+        possible_paths = []
 
-        if not os.path.exists(image_path):
-            logger.warning(f"⚠️ Missing image file: {image_path}")
+        for base in ["images", "data/wikiart", "data/images"]:
+            possible_paths.extend(glob.glob(f"{base}/**/{search_name}", recursive=True))
+
+        if possible_paths:
+            abs_path = possible_paths[0]
+        else:
+            logger.warning(f"⚠️ Missing file for {filename}")
             continue
 
-        vec = build_vector_from_image(image_path)
-        if vec is None:
+        try:
+            # ─────────────────────
+            # 1️⃣ Generate embeddings (safe)
+            # ─────────────────────
+            embs = {
+                "style":   safe_embedding(generate_style_embedding, abs_path),
+                "texture": safe_embedding(generate_texture_embedding, abs_path),
+                "color": safe_embedding(generate_color_embedding, abs_path),
+                "emotion": safe_embedding(generate_emotion_embedding, abs_path),
+            }
+
+            # ─────────────────────
+            # 2️⃣ Generate metadata
+            # ─────────────────────
+            tags = auto_tags_from_embeddings(embs)
+            if not tags or not isinstance(tags, dict):
+                logger.warning(f"⚠️ Invalid metadata for {filename}, using defaults")
+                tags = {
+                    "style": "Unknown",
+                    "color": "Unknown",
+                    "texture": "Unknown",
+                    "emotion": "Unknown",
+                }
+
+            # ─────────────────────
+            # 3️⃣ Update SQLite DB
+            # ─────────────────────
+            cur.execute("""
+                UPDATE artworks
+                SET style = ?,
+                    color = ?,
+                    texture = ?,
+                    emotion = ?,
+                    metadata_json = ?
+                WHERE id = ?
+            """, (
+                tags["style"], tags["color"], tags["texture"], tags["emotion"],
+                json.dumps(tags), art_id
+            ))
+            conn.commit()
+            logger.info(f"✅ Updated DB for {filename}")
+
+            # ─────────────────────
+            # 4️⃣ Push to Weaviate
+            # ─────────────────────
+            dummy = type("Artwork", (), {})()
+            dummy.id = art_id
+            dummy.filename = filename
+            dummy.filepath = filepath
+            dummy.style = tags["style"]
+            dummy.color = tags["color"]
+            dummy.texture = tags["texture"]
+            dummy.emotion = tags["emotion"]
+
+            dummy.uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, str(art_id)))
+            insert_embedding_to_weaviate(dummy, embs, object_id=dummy.uuid)
+            logger.info(f"✅ Synced to Weaviate: {filename}")
+
+        except Exception as e:
+            logger.error(f"❌ Failed for {filename}: {e}")
             continue
 
-        obj = {
-            "filename": filename,
-            "filepath": filepath,
-            "style": style,
-            "texture": texture,
-            "palette": color,
-            "emotion": emotion,
-        }
+    logger.info("🎯 Regeneration & sync complete.")
+    db.close()
+    conn.close()
 
-        batch.append({"object": obj, "vector": vec})
-        if len(batch) >= 100:
-            with client.batch(batch_size=100) as b:
-                for item in batch:
-                    b.add_data_object(
-                        data_object=item["object"],
-                        class_name=CLASS_NAME,
-                        uuid=str(uuid4()),
-                        vector=item["vector"].tolist(),
-                    )
-            batch = []
 
-    if batch:
-        with client.batch(batch_size=100) as b:
-            for item in batch:
-                b.add_data_object(
-                    data_object=item["object"],
-                    class_name=CLASS_NAME,
-                    uuid=str(uuid4()),
-                    vector=item["vector"].tolist(),
-                )
-
-    logger.info("✅ Sync complete. All embeddings pushed to Weaviate.")
-
+# ─────────────────────────────────────────────────────────────
+# Entrypoint
+# ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    DB_PATH = os.getenv("DB_PATH", "/app/data/artworks.db")
-    IMAGES_ROOT = os.getenv("IMAGES_ROOT", "/app/data/wikiart")  # ✅ keep this since images are in /wikiart
-    sync_embeddings(DB_PATH, IMAGES_ROOT)
+    DB_PATH = os.getenv("DB_PATH", "./data/artworks.db")
+    regenerate_all(DB_PATH)

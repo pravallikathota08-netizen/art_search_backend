@@ -50,6 +50,7 @@ class ArtworkMetadata(BaseModel):
     color: Optional[str] = None
     texture: Optional[str] = None
     emotion: Optional[str] = None
+    metadata_json: Optional[dict] = None 
 
     if IS_V2:
         model_config = {"from_attributes": True}

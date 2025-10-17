@@ -1,5 +1,5 @@
 # models.py
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Float, Boolean
 from sqlalchemy.sql import func
 from sqlalchemy.types import JSON
 from database import Base
@@ -18,8 +18,8 @@ class User(Base):
 class Artwork(Base):
     __tablename__ = "artworks"
     id = Column(Integer, primary_key=True, index=True)
-    filename = Column(String)
-    filepath = Column(String)
+    filename = Column(String, nullable=False)
+    filepath = Column(String, nullable=False)
 
     title = Column(String, nullable=True)
     artist = Column(String, nullable=True)
@@ -27,11 +27,17 @@ class Artwork(Base):
     color = Column(String, nullable=True)
     texture = Column(String, nullable=True)
     emotion = Column(String, nullable=True)
-    uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # single relationship, not a list
-    embedding = relationship("Embedding", back_populates="artwork", uselist=False, cascade="all, delete-orphan")
+    metadata_json = Column(JSON, nullable=True)     
+    is_permanent  = Column(Boolean, default=True)    
+    uploaded_at   = Column(DateTime(timezone=True), server_default=func.now())
 
+    embedding = relationship(
+        "Embedding",
+        back_populates="artwork",
+        uselist=False,
+        cascade="all, delete-orphan"
+    )
 class Embedding(Base):
     __tablename__ = "embeddings"
     id = Column(Integer, primary_key=True, index=True)
