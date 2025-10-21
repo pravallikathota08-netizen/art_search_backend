@@ -19,10 +19,15 @@ from colorthief import ColorThief
 from datetime import datetime
 from vector_db import init_weaviate_schema, insert_embedding_to_weaviate
 from schemas import Token, SearchResponse, UploadResponse, FileResult, ArtworkMetadata
-
+from fastapi.requests import Request
+from fastapi.responses import JSONResponse
+import traceback
 from weaviate import Client
-import numpy as np
+import time
+from fastapi import Request
 from utils.embedding_validation import validate_embedding
+from models import UserProfile
+from schemas import UserProfileResponse, UserProfileUpdate
 
 
 # local imports
@@ -68,20 +73,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ───────────────────────────────
+# REQUEST LOGGING MIDDLEWARE
+# ───────────────────────────────
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        process_time = (time.time() - start_time) * 1000
+        logger.info(
+            f"{request.method} {request.url.path} "
+            f"completed in {process_time:.2f} ms → Status {response.status_code}"
+        )
+        return response
+    except Exception as e:
+        process_time = (time.time() - start_time) * 1000
+        logger.error(
+            f"⚠️ Error during {request.method} {request.url.path} "
+            f"after {process_time:.2f} ms: {e}"
+        )
+        raise  # Global error handler will catch this
+
 # directories
 os.makedirs("images", exist_ok=True)
 os.makedirs("logs", exist_ok=True)
 app.mount("/images", StaticFiles(directory="images"), name="images")
 
-# logging
+#logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    handlers=[logging.FileHandler("logs/app.log"), logging.StreamHandler()],
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[
+        logging.FileHandler("logs/app.log"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger("api")
 
-# auth
+
+#auth
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 
@@ -531,6 +562,36 @@ async def extract_palette(file: UploadFile = File(...), current_user: User = Dep
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
+# ───────────────────────────────
+# User Profile APIs
+# ───────────────────────────────
+@app.get("/profile/{id}", response_model=UserProfileResponse)
+async def get_user_profile(id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    profile = db.query(UserProfile).filter(UserProfile.id == id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile
+# ───────────────────────────────
+# GLOBAL ERROR HANDLER
+# ───────────────────────────────
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Catch all unhandled exceptions and return JSON with details.
+    """
+    # Log full traceback
+    logger.error(f"❌ Unhandled error for {request.method} {request.url}: {exc}")
+    logger.debug(traceback.format_exc())
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "error",
+            "message": "Internal Server Error",
+            "details": str(exc),
+            "path": str(request.url),
+        },
+    )
 # ───────────────────────────────
 # Health
 # ───────────────────────────────

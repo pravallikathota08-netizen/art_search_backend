@@ -1,5 +1,8 @@
 from typing import List, Optional
 from pydantic import BaseModel
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime
 import pydantic  # <-- you forgot to import this earlier
 
 # Detect if Pydantic v2 is being used
@@ -57,6 +60,30 @@ class ArtworkMetadata(BaseModel):
     else:
         class Config:
             orm_mode = True
+
+# ───────────────────────────────
+# User Profile Schemas
+# ───────────────────────────────
+class UserProfileBase(BaseModel):
+    full_name: Optional[str] = None
+    email: str
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+class UserProfileUpdate(BaseModel):
+    full_name: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+class UserProfileResponse(UserProfileBase):
+    id: int
+    user_id: int
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+
+    class Config:
+        orm_mode = True
+
 
 
 # ───────────────────────────────

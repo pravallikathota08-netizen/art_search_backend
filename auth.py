@@ -22,13 +22,13 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Password helpers
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    # ✅ Prevent bcrypt crash
+    #Prevent bcrypt crash
     if len(plain_password) > MAX_PASSWORD_LEN:
         return False
     return pwd_context.verify(plain_password, hashed_password)
 
 def get_password_hash(password: str) -> str:
-    # ✅ Prevent too-long passwords at creation
+    #Prevent too-long passwords at creation
     if len(password) > MAX_PASSWORD_LEN:
         raise ValueError("Password too long. Maximum allowed is 72 characters.")
     return pwd_context.hash(password)

@@ -19,4 +19,6 @@ sqlalchemy
 weaviate-client==4.6.2
 psycopg2-binary==2.9.9
 python-jose
+scikit-learn>=1.0
+
 
